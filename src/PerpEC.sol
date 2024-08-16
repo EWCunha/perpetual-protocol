@@ -19,6 +19,7 @@ contract PerpEC is ERC20 {
     /// -----------------------------------------------------------------------
 
     error PerpEC__NotEnoughAllowance();
+    error PerpEC__ExceedsMaxLeverage();
 
     /// -----------------------------------------------------------------------
     /// Custom types
@@ -29,14 +30,24 @@ contract PerpEC is ERC20 {
         SHORT
     }
 
+    struct Position {
+        PositionType positionType;
+        uint256 collateral;
+        uint256 size;
+    }
+
+
     /// -----------------------------------------------------------------------
     /// Storage/state variables
     /// -----------------------------------------------------------------------
 
     uint256 internal s_lockedLiquidity;
+    uint256 internal s_maxLeverage;
     IERC20 internal immutable i_collateralToken;
     IERC20 internal immutable i_wbtc;
     AggregatorV3Interface internal immutable i_priceOracle;
+
+    mapping(address => Position) internal s_positions;
 
     /// -----------------------------------------------------------------------
     /// Events
@@ -44,6 +55,7 @@ contract PerpEC is ERC20 {
 
     event LiquidityAdded(address indexed provider, uint256 amount);
     event LiquidityRemoved(address indexed provider, uint256 amount);
+    event PositionOpened(address indexed trader, PositionType positionType, uint256 collateral, uint256 size);
 
     /// -----------------------------------------------------------------------
     /// Constructor logic
@@ -52,11 +64,13 @@ contract PerpEC is ERC20 {
     constructor(
         address collateralToken,
         address wbtc,
-        address priceOracle
+        address priceOracle,
+        uint256 maxLeverage
     ) ERC20("Liquidity token PerpEC", "LTPerpEC") {
         i_collateralToken = IERC20(collateralToken);
         i_wbtc = IERC20(wbtc);
         i_priceOracle = AggregatorV3Interface(priceOracle);
+        s_maxLeverage = maxLeverage;
     }
 
     /// -----------------------------------------------------------------------
@@ -67,7 +81,33 @@ contract PerpEC is ERC20 {
         PositionType type_,
         uint256 collateral,
         uint256 size
-    ) external {}
+    ) external {
+
+        // TODO: Implement the logic for liquidity reserves valiation - Traders cannot utilize more than a configured percentage of the deposited liquidity.
+
+        // Check if the position (size / collateral) exceeds the max leverage
+        uint256 indexTokenPrice = getPrice();
+        uint256 sizeInCollateralToken = (size * indexTokenPrice) / 1e18;
+        if (sizeInCollateralToken > collateral * s_maxLeverage) {
+            revert PerpEC__ExceedsMaxLeverage();
+        }
+        
+        // Collateral transfer
+        if (i_collateralToken.allowance(msg.sender, address(this)) < collateral) {
+            revert PerpEC__NotEnoughAllowance();
+        }
+
+        i_collateralToken.transferFrom(msg.sender, address(this), collateral);
+
+        // Store the position
+        s_positions[msg.sender] = Position({
+            positionType: type_,
+            collateral: collateral,
+            size: size
+        });
+
+        emit PositionOpened(msg.sender, type_, collateral, size);
+    }
 
     function addLiquidity(uint256 amount) external {
         if (i_wbtc.allowance(msg.sender, address(this)) < amount) {
