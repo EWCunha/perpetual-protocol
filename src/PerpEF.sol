@@ -49,6 +49,9 @@ contract PerpEF is ERC20 {
     /// @dev error for when a position violates the liquidity reserves limit.
     error PerpEF__LiquidityReservesInvalidated();
 
+    /// @dev error for when a position could not be found for calling trader.
+    error PerpEF__PositionNotFound();
+
     /// -----------------------------------------------------------------------
     /// Custom types
     /// -----------------------------------------------------------------------
@@ -69,6 +72,7 @@ contract PerpEF is ERC20 {
         PositionType positionType;
         uint256 collateral;
         uint256 size;
+        uint256 sizeInIndexTokens;
     }
 
     /// -----------------------------------------------------------------------
@@ -87,7 +91,8 @@ contract PerpEF is ERC20 {
 
     mapping(address => Position) internal s_positions;
 
-    uint256 internal immutable PRECISION;
+    uint256 internal immutable TOKEN_PRECISION;
+    uint256 internal immutable PRICE_PRECISION;
 
     /// -----------------------------------------------------------------------
     /// Events
@@ -112,13 +117,33 @@ contract PerpEF is ERC20 {
      * @param trader: address of the trader that has opened the position.
      * @param positionType: type of the opened position.
      * @param collateral: amount of collateral given to open position.
-     * @param size: size amount of the position.
+     * @param size: size amount of the position, in index tokens.
      */
     event PositionOpened(
         address indexed trader,
         PositionType positionType,
         uint256 collateral,
         uint256 size
+    );
+
+    /**
+     * @dev event for when a collateral is increased.
+     * @param trader: address of the trader.
+     * @param increaseInCollateral: amount of increased collateral.
+     */
+    event CollateralIncreased(
+        address indexed trader,
+        uint256 increaseInCollateral
+    );
+
+    /**
+     * @dev event for when size is increased.
+     * @param trader: address of the trader.
+     * @param increaseInSizeInCollateralToken: amount of increased size.
+     */
+    event SizeIncreased(
+        address indexed trader,
+        uint256 increaseInSizeInCollateralToken
     );
 
     /// -----------------------------------------------------------------------
@@ -146,7 +171,8 @@ contract PerpEF is ERC20 {
         i_priceOracle = AggregatorV3Interface(priceOracle);
         s_maxLeverage = maxLeverage;
         s_maxUtilizationPercentage = maxUtilizationPercentage;
-        PRECISION = 10 ** IERC20Decimals(wbtc).decimals();
+        TOKEN_PRECISION = 10 ** IERC20Decimals(wbtc).decimals();
+        PRICE_PRECISION = 10 ** i_priceOracle.decimals();
     }
 
     /// -----------------------------------------------------------------------
@@ -165,16 +191,15 @@ contract PerpEF is ERC20 {
         uint256 size
     ) external {
         // Check if the position (size / collateral) exceeds the max leverage
+        _checkIfExceedsMaxLevarage(collateral, size);
+
+        // liquidity reserves valiation - Traders cannot utilize more than a configured percentage of the deposited liquidity.
         uint256 indexTokenPrice = getPrice();
-        s_shortOpenInterest += size;
-        s_longOpenInterestInTokens += _checkIfExceedsMaxLevarage(
-            collateral,
+        uint256 sizeInIndexTokens = _convertToIndexTokens(
             size,
             indexTokenPrice
         );
-
-        // liquidity reserves valiation - Traders cannot utilize more than a configured percentage of the deposited liquidity.
-        _validateLiquidityReserves(indexTokenPrice);
+        _validateLiquidityReserves(indexTokenPrice, size, sizeInIndexTokens);
 
         // Collateral transfer
         if (
@@ -183,16 +208,81 @@ contract PerpEF is ERC20 {
             revert PerpEF__NotEnoughAllowance();
         }
 
+        s_shortOpenInterest += size;
+        s_longOpenInterestInTokens += sizeInIndexTokens;
+
         // Store the position
         s_positions[msg.sender] = Position({
             positionType: type_,
             collateral: collateral,
-            size: size
+            size: size,
+            sizeInIndexTokens: sizeInIndexTokens
         });
 
         i_collateralToken.transferFrom(msg.sender, address(this), collateral);
 
         emit PositionOpened(msg.sender, type_, collateral, size);
+    }
+
+    /**
+     * @notice Increases collateral of a position.
+     * @param collateralAmountToIncrease: amount of collateral do be increased, in collateral token.
+     */
+    function increaseCollateral(uint256 collateralAmountToIncrease) external {
+        Position storage position = s_positions[msg.sender];
+        if (position.collateral == 0) {
+            revert PerpEF__PositionNotFound();
+        }
+        _checkIfExceedsMaxLevarage(
+            position.collateral + collateralAmountToIncrease,
+            position.size
+        );
+        uint256 indexTokenPrice = getPrice();
+        uint256 sizeInIndexTokens = _convertToIndexTokens(
+            position.size,
+            indexTokenPrice
+        );
+        _validateLiquidityReserves(
+            indexTokenPrice,
+            position.size,
+            sizeInIndexTokens
+        );
+
+        position.collateral += collateralAmountToIncrease;
+
+        emit CollateralIncreased(msg.sender, collateralAmountToIncrease);
+    }
+
+    /**
+     * @notice Increases size of a position.
+     * @param sizeAmountToIncreaseInCollateralToken: amount to be increased in size, in collateral token.
+     */
+    function increaseSize(
+        uint256 sizeAmountToIncreaseInCollateralToken
+    ) external {
+        Position storage position = s_positions[msg.sender];
+        if (position.collateral == 0) {
+            revert PerpEF__PositionNotFound();
+        }
+
+        _checkIfExceedsMaxLevarage(
+            position.collateral,
+            position.size + sizeAmountToIncreaseInCollateralToken
+        );
+        uint256 indexTokenPrice = getPrice();
+        uint256 sizeInIndexTokens = _convertToIndexTokens(
+            position.size + sizeAmountToIncreaseInCollateralToken,
+            indexTokenPrice
+        );
+        _validateLiquidityReserves(
+            indexTokenPrice,
+            position.size + sizeAmountToIncreaseInCollateralToken,
+            sizeInIndexTokens
+        );
+
+        position.size += sizeAmountToIncreaseInCollateralToken;
+
+        emit SizeIncreased(msg.sender, sizeAmountToIncreaseInCollateralToken);
     }
 
     /**
@@ -275,19 +365,14 @@ contract PerpEF is ERC20 {
      * @dev Reverts if it does.
      * @param collateral: amount of collateral in collateral token.
      * @param size: size value for the position, in collateral token.
-     * @param indexTokenPrice: price of the index token. In this case, WBTC.
      */
     function _checkIfExceedsMaxLevarage(
         uint256 collateral,
-        uint256 size,
-        uint256 indexTokenPrice
-    ) internal view returns (uint256) {
-        uint256 sizeInCollateralToken = (size * indexTokenPrice) / PRECISION;
-        if (sizeInCollateralToken > collateral * s_maxLeverage) {
+        uint256 size
+    ) internal view {
+        if (size > collateral * s_maxLeverage) {
             revert PerpEF__ExceedsMaxLeverage();
         }
-
-        return sizeInCollateralToken;
     }
 
     /**
@@ -295,15 +380,37 @@ contract PerpEF is ERC20 {
      * @dev Traders cannot utilize more than a configured percentage of the deposited liquidity.
      * @dev Reverts if that happens.
      * @param indexTokenPrice: price of the index token. In this case, WBTC.
+     * @param size: size value for the position, in collateral token.
+     * @param sizeInIndexTokens: size value for the position, in index token.
      */
-    function _validateLiquidityReserves(uint256 indexTokenPrice) internal view {
+    function _validateLiquidityReserves(
+        uint256 indexTokenPrice,
+        uint256 size,
+        uint256 sizeInIndexTokens
+    ) internal view {
         if (
-            !(s_shortOpenInterest +
-                s_longOpenInterestInTokens *
+            !((s_shortOpenInterest + size) +
+                (s_longOpenInterestInTokens + sizeInIndexTokens) *
                 indexTokenPrice <
                 s_depositedLiquidity * s_maxUtilizationPercentage)
         ) {
             revert PerpEF__LiquidityReservesInvalidated();
         }
+    }
+
+    /**
+     * @dev Converts given value to index token amount.
+     * @param amountInCollateralToken: value to be converted.
+     * @param tokenPrice: price of index token.
+     * @return - uint256 - converted amount of index token.
+     */
+    function _convertToIndexTokens(
+        uint256 amountInCollateralToken,
+        uint256 tokenPrice
+    ) internal view returns (uint256) {
+        // ((USD * token_precision ) * (WBTC/USD * price_precision)) / (token_precision * price_precision) = WBTC
+        return
+            (amountInCollateralToken * tokenPrice) /
+            (TOKEN_PRECISION * PRICE_PRECISION);
     }
 }
