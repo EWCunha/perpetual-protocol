@@ -9,6 +9,7 @@ pragma solidity 0.8.26;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/shared/interfaces/AggregatorV3Interface.sol";
 
 // ---- Internal imports ----
@@ -25,7 +26,7 @@ import {IERC20Decimals} from "./interfaces/IERC20Decimals.sol";
  * @notice Uses WBTC as indexed token.
  * @notice Assumes collateral token is a USD pegged stablecoin (i.e. USDC, USDT, DAI).
  */
-contract PerpEF is ERC20 {
+contract PerpEF is ERC20, Ownable {
     /// -----------------------------------------------------------------------
     /// Custom errors
     /// -----------------------------------------------------------------------
@@ -81,7 +82,7 @@ contract PerpEF is ERC20 {
 
     uint256 internal s_maxLeverage;
     uint256 internal s_maxUtilizationPercentage;
-    uint256 internal s_lockedLiquidity;
+    uint256 internal s_lockedLiquidity; // @follow-up how to increment this?
     uint256 internal s_depositedLiquidity;
     uint256 internal s_shortOpenInterest;
     uint256 internal s_longOpenInterestInTokens;
@@ -165,7 +166,7 @@ contract PerpEF is ERC20 {
         address priceOracle,
         uint256 maxLeverage,
         uint256 maxUtilizationPercentage
-    ) ERC20("Liquidity token PerpEF", "LTPerpEF") {
+    ) ERC20("Liquidity token PerpEF", "LTPerpEF") Ownable(msg.sender) {
         i_collateralToken = IERC20(collateralToken);
         i_wbtc = IERC20(wbtc);
         i_priceOracle = AggregatorV3Interface(priceOracle);
@@ -302,6 +303,7 @@ contract PerpEF is ERC20 {
             _mint(msg.sender, (amount * totalSupply()) / balance);
         }
 
+        s_depositedLiquidity += amount;
         i_wbtc.transferFrom(msg.sender, address(this), amount);
 
         emit LiquidityAdded(msg.sender, amount);
@@ -326,6 +328,24 @@ contract PerpEF is ERC20 {
         i_wbtc.transfer(msg.sender, liquidityAmount);
 
         emit LiquidityRemoved(msg.sender, liquidityAmount);
+    }
+
+    /**
+     * @notice Sets new maximum leverage permitted.
+     * @param newMaxLeverage: new max leverage permitted.
+     */
+    function setMaxLeverage(uint256 newMaxLeverage) external onlyOwner {
+        s_maxLeverage = newMaxLeverage;
+    }
+
+    /**
+     * @notice Sets a new value for maximum liquidity utilization percentage.
+     * @param newMaxUtilizationPercentage: new maxium liquidity utilization percentage.
+     */
+    function setMaxUtilizationPercentage(
+        uint256 newMaxUtilizationPercentage
+    ) external onlyOwner {
+        s_maxUtilizationPercentage = newMaxUtilizationPercentage;
     }
 
     /// -----------------------------------------------------------------------
@@ -354,6 +374,109 @@ contract PerpEF is ERC20 {
         (, int256 answer, , , ) = i_priceOracle.latestRoundData();
 
         return uint256(answer);
+    }
+
+    /**
+     * @notice Reads s_maxLeverage storage variable.
+     * @return - uint256 - value of the maximum leverage allowed.
+     */
+    function getMaxLeverage() external view returns (uint256) {
+        return s_maxLeverage;
+    }
+
+    /**
+     * @notice Reads s_maxUtilizationPercentage storage variable.
+     * @return - uint256 - value of the maximum liquidity utilization percentage.
+     */
+    function getMaxUtilizationPercentage() external view returns (uint256) {
+        return s_maxUtilizationPercentage;
+    }
+
+    /**
+     * @notice Reads s_lockedLiquidity storage variable.
+     * @return - uint256 - amount of locked liquidity.
+     */
+    function getLockedLiquidity() external view returns (uint256) {
+        return s_lockedLiquidity;
+    }
+
+    /**
+     * @notice Reads s_depositedLiquidity storage variable.
+     * @return - uint256 - amount of deposited liquidity.
+     */
+    function getDepositedLiquidity() external view returns (uint256) {
+        return s_depositedLiquidity;
+    }
+
+    /**
+     * @notice Reads s_shortOpenInterest storage variable.
+     * @return - uint256 - sum of short open interests.
+     */
+    function getShortOpenInterest() external view returns (uint256) {
+        return s_shortOpenInterest;
+    }
+
+    /**
+     * @notice Reads s_longOpenInterestInTokens storage variable.
+     * @return - uint256 - sum of long open interests, in index tokens.
+     */
+    function getLongOpenInterestInIndexTokens()
+        external
+        view
+        returns (uint256)
+    {
+        return s_longOpenInterestInTokens;
+    }
+
+    /**
+     * @notice Reads i_collateralToken immutable variable.
+     * @return - IERC20 - interface of the ERC20 collateral token smart contract.
+     */
+    function getCollateralToken() external view returns (IERC20) {
+        return i_collateralToken;
+    }
+
+    /**
+     * @notice Reads i_wbtc immutable variable.
+     * @return - IERC20 - interface of the ERC20 WBTC token smart contract.
+     */
+    function getWBTC() external view returns (IERC20) {
+        return i_wbtc;
+    }
+
+    /**
+     * @notice Reads i_priceOracle immutable variable.
+     * @return - AggregatorV3Interface - interface of the price oracle smart contract.
+     */
+    function getPriceOracle() external view returns (AggregatorV3Interface) {
+        return i_priceOracle;
+    }
+
+    /**
+     * @notice Reads s_positions storage variable of given address.
+     * @param trader: address of the trader.
+     * @return - Position - data of the trader's position.
+     */
+    function getPosition(
+        address trader
+    ) external view returns (Position memory) {
+        return s_positions[trader];
+    }
+
+    /**
+     * @notice Reads TOKEN_PRECISION immutable variable.
+     * @return - uint256 - precision of the index token (i.e. 10 ** token.decimals()).
+     */
+    function getTokenPrecision() external view returns (uint256) {
+        return TOKEN_PRECISION;
+    }
+
+    /**
+     * @notice Reads PRICE_PRECISION immutable variable.
+     * @return - uint256 - precision of the price oracle (i.e. 10 ** oracle.decimals()).
+     */
+    function getPricePrecision() external view returns (uint256) {
+        return PRICE_PRECISION;
     }
 
     /// -----------------------------------------------------------------------
