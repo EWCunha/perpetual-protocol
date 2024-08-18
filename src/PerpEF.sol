@@ -209,8 +209,11 @@ contract PerpEF is ERC20, Ownable {
             revert PerpEF__NotEnoughAllowance();
         }
 
-        s_shortOpenInterest += size;
-        s_longOpenInterestInTokens += sizeInIndexTokens;
+        if (type_ == PositionType.SHORT) {
+            s_shortOpenInterest += size;
+        } else {
+            s_longOpenInterestInTokens += sizeInIndexTokens;
+        }
 
         // Store the position
         s_positions[msg.sender] = Position({
