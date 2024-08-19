@@ -193,6 +193,12 @@ contract PerpEF is ERC20, Ownable {
         uint256 collateral,
         uint256 size
     ) external {
+        if (
+            i_collateralToken.allowance(msg.sender, address(this)) < collateral
+        ) {
+            revert PerpEF__NotEnoughAllowance();
+        }
+
         // Check if the position (size / collateral) exceeds the max leverage
         _checkIfExceedsMaxLevarage(collateral, size);
 
@@ -219,11 +225,6 @@ contract PerpEF is ERC20, Ownable {
         });
 
         // Collateral transfer
-        if (
-            i_collateralToken.allowance(msg.sender, address(this)) < collateral
-        ) {
-            revert PerpEF__NotEnoughAllowance();
-        }
         i_collateralToken.transferFrom(msg.sender, address(this), collateral);
 
         emit PositionOpened(msg.sender, type_, collateral, size);
@@ -234,6 +235,12 @@ contract PerpEF is ERC20, Ownable {
      * @param collateralAmountToIncrease: amount of collateral do be increased, in collateral token.
      */
     function increaseCollateral(uint256 collateralAmountToIncrease) external {
+        if (
+            i_collateralToken.allowance(msg.sender, address(this)) < collateralAmountToIncrease
+        ) {
+            revert PerpEF__NotEnoughAllowance();
+        }
+
         Position storage position = s_positions[msg.sender];
         if (position.collateral == 0) {
             revert PerpEF__PositionNotFound();
@@ -261,11 +268,6 @@ contract PerpEF is ERC20, Ownable {
         position.collateral += collateralAmountToIncrease;
 
         // Collateral transfer
-        if (
-            i_collateralToken.allowance(msg.sender, address(this)) < collateralAmountToIncrease
-        ) {
-            revert PerpEF__NotEnoughAllowance();
-        }
         i_collateralToken.transferFrom(msg.sender, address(this), collateralAmountToIncrease);
 
         emit CollateralIncreased(msg.sender, collateralAmountToIncrease);
