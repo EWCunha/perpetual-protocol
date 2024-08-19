@@ -202,20 +202,13 @@ contract PerpEF is ERC20, Ownable {
             size,
             indexTokenPrice
         );
-        _validateLiquidityReserves(indexTokenPrice, size, sizeInIndexTokens);
-
-        // Collateral transfer
-        if (
-            i_collateralToken.allowance(msg.sender, address(this)) < collateral
-        ) {
-            revert PerpEF__NotEnoughAllowance();
-        }
-
         if (type_ == PositionType.SHORT) {
+            _validateLiquidityReserves(indexTokenPrice, size, 0);
             s_shortOpenInterest += size;
         } else {
+            _validateLiquidityReserves(indexTokenPrice, 0, sizeInIndexTokens);
             s_longOpenInterestInTokens += sizeInIndexTokens;
-        }
+        }       
 
         // Store the position
         s_positions[msg.sender] = Position({
@@ -225,6 +218,12 @@ contract PerpEF is ERC20, Ownable {
             sizeInIndexTokens: sizeInIndexTokens
         });
 
+        // Collateral transfer
+        if (
+            i_collateralToken.allowance(msg.sender, address(this)) < collateral
+        ) {
+            revert PerpEF__NotEnoughAllowance();
+        }
         i_collateralToken.transferFrom(msg.sender, address(this), collateral);
 
         emit PositionOpened(msg.sender, type_, collateral, size);
@@ -297,11 +296,22 @@ contract PerpEF is ERC20, Ownable {
             sizeAmountToIncreaseInCollateralToken,
             indexTokenPrice
         );
-        _validateLiquidityReserves(
-            indexTokenPrice,
-            position.size + sizeAmountToIncreaseInCollateralToken,
-            position.sizeInIndexTokens + sizeAmountToIncreaseInIndexTokens
-        );
+
+        if (type_ == PositionType.SHORT) {
+            _validateLiquidityReserves(
+                indexTokenPrice,
+                sizeAmountToIncreaseInCollateralToken,
+                0
+            );
+            s_shortOpenInterest += sizeAmountToIncreaseInCollateralToken;
+        } else {
+            _validateLiquidityReserves(
+                indexTokenPrice,
+                0,
+                sizeAmountToIncreaseInIndexTokens
+            );
+            s_longOpenInterestInTokens += sizeAmountToIncreaseInIndexTokens;
+        }
 
         position.size += sizeAmountToIncreaseInCollateralToken;
         position.sizeInIndexTokens += sizeAmountToIncreaseInIndexTokens;
