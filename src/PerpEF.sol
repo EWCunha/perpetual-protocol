@@ -73,7 +73,9 @@ contract PerpEF is ERC20, Ownable {
         PositionType positionType;
         uint256 collateral;
         uint256 size;
-        uint256 sizeInIndexTokens;
+        uint256 sizeInIndexTokens; // this changes only when the position is realized or closed.
+        uint256 startTimestamp;
+        uint256 borrowingFee; // update every time there is a liquidation check
     }
 
     /// -----------------------------------------------------------------------
@@ -86,6 +88,9 @@ contract PerpEF is ERC20, Ownable {
     uint256 internal s_depositedLiquidity;
     uint256 internal s_shortOpenInterest;
     uint256 internal s_longOpenInterestInTokens;
+    uint256 internal s_liquidatorFee; // @follow-up decide this
+    uint256 internal s_borrowingPerSharePerSecond; // @follow-up decide this
+    uint256 internal s_positionFee; // @follow-up decide this
     IERC20 internal immutable i_collateralToken;
     IERC20 internal immutable i_wbtc;
     AggregatorV3Interface internal immutable i_priceOracle;
@@ -214,14 +219,16 @@ contract PerpEF is ERC20, Ownable {
         } else {
             _validateLiquidityReserves(indexTokenPrice, 0, sizeInIndexTokens);
             s_longOpenInterestInTokens += sizeInIndexTokens;
-        }       
+        }
 
         // Store the position
         s_positions[msg.sender] = Position({
             positionType: type_,
             collateral: collateral,
             size: size,
-            sizeInIndexTokens: sizeInIndexTokens
+            sizeInIndexTokens: sizeInIndexTokens,
+            startTimestamp: block.timestamp,
+            borrowingFee: 0
         });
 
         // Collateral transfer
@@ -236,7 +243,8 @@ contract PerpEF is ERC20, Ownable {
      */
     function increaseCollateral(uint256 collateralAmountToIncrease) external {
         if (
-            i_collateralToken.allowance(msg.sender, address(this)) < collateralAmountToIncrease
+            i_collateralToken.allowance(msg.sender, address(this)) <
+            collateralAmountToIncrease
         ) {
             revert PerpEF__NotEnoughAllowance();
         }
@@ -259,18 +267,25 @@ contract PerpEF is ERC20, Ownable {
         */
 
         // @follow-up: here wre are not increasing the size, so we can keep both values as 0
-        _validateLiquidityReserves(
-            indexTokenPrice,
-            0,
-            0
-        );
+        _validateLiquidityReserves(indexTokenPrice, 0, 0);
 
         position.collateral += collateralAmountToIncrease;
 
         // Collateral transfer
-        i_collateralToken.transferFrom(msg.sender, address(this), collateralAmountToIncrease);
+        i_collateralToken.transferFrom(
+            msg.sender,
+            address(this),
+            collateralAmountToIncrease
+        );
 
         emit CollateralIncreased(msg.sender, collateralAmountToIncrease);
+    }
+
+    function decreaseCollateral(uint256 collateralAmountToDecrease) external {
+        // check if there is a opened position
+        // check if the new position collateral exceeds max leverage, if exceeds, revert
+        // update storage (Position)
+        // transfer collateral to trader
     }
 
     /**
@@ -290,8 +305,8 @@ contract PerpEF is ERC20, Ownable {
             position.size + sizeAmountToIncreaseInCollateralToken
         );
         uint256 indexTokenPrice = getPrice();
-        
-        // @follow-up: 
+
+        // @follow-up
         // think here the sizeInIndexTokens that already in the position should remain unchanged
         // and we should only calculate the sizeAmountToIncreaseInIndexTokens based on current price
         uint256 sizeAmountToIncreaseInIndexTokens = _convertToIndexTokens(
@@ -299,7 +314,7 @@ contract PerpEF is ERC20, Ownable {
             indexTokenPrice
         );
 
-        if (type_ == PositionType.SHORT) {
+        if (position.positionType == PositionType.SHORT) {
             _validateLiquidityReserves(
                 indexTokenPrice,
                 sizeAmountToIncreaseInCollateralToken,
@@ -318,7 +333,51 @@ contract PerpEF is ERC20, Ownable {
         position.size += sizeAmountToIncreaseInCollateralToken;
         position.sizeInIndexTokens += sizeAmountToIncreaseInIndexTokens;
 
-        emit SizeIncreased(msg.sender, sizeAmountToIncreaseInCollateralToken, sizeAmountToIncreaseInIndexTokens);
+        emit SizeIncreased(
+            msg.sender,
+            sizeAmountToIncreaseInCollateralToken,
+            sizeAmountToIncreaseInIndexTokens
+        );
+    }
+
+    function decreaseSize(
+        uint256 sizeAmountToDecreaseInCollateralToken
+    ) external {
+        // check if there is a opened position
+        // check if the new position size exceeds max leverage, if not exceeds, it should not trigg liquidation
+        // check if LONG or SHORT position
+        // calculate postion PnL
+        // calulate realizable amount
+        // update storage variables (Position) -> consider positionFee and borrowingFee
+        // transfer realizable amount
+
+        Position storage position = s_positions[msg.sender];
+        if (position.collateral == 0) {
+            revert PerpEF__PositionNotFound();
+        }
+
+        _checkIfExceedsMaxLevarage(
+            position.collateral,
+            position.size - sizeAmountToDecreaseInCollateralToken
+        );
+
+        uint256 indexTokenPrice = getPrice();
+
+        // @follow-up
+        // think here the sizeInIndexTokens that already in the position should remain unchanged
+        // and we should only calculate the sizeAmountToIncreaseInIndexTokens based on current price
+        uint256 sizeAmountToDecreaseInIndexTokens = _convertToIndexTokens(
+            sizeAmountToDecreaseInCollateralToken,
+            indexTokenPrice
+        );
+    }
+
+    function liquidate(address trader) external {
+        // check if there is a opened position
+        // check if position is liquidatable
+        // calculate liquidator fee -> deduce from the collateral
+        // liquidate position
+        // transfer liquidator fee
     }
 
     /**
