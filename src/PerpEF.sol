@@ -72,8 +72,8 @@ contract PerpEF is ERC20, Ownable {
     struct Position {
         PositionType positionType;
         uint256 collateral;
-        uint256 size;
-        uint256 sizeInIndexTokens; // this changes only when the position is realized or closed.
+        uint256 size; // this tracks the cost of the position, changes only when the position is realized (decreased), increased, or closed
+        uint256 sizeInIndexTokens; // this changes only when the position is realized (decreased), increased, or closed.
         uint256 lastUpdateTimestamp;
         uint256 borrowingFee; // update every time there is a liquidation check
     }
@@ -262,7 +262,7 @@ contract PerpEF is ERC20, Ownable {
         }
         _checkIfExceedsMaxLevarageAndRevert(
             position.collateral + collateralAmountToIncrease,
-            position.size
+            _convertToCollateralToken(position.sizeInIndexTokens, getPrice()) // real-time worth of the position in collateral token
         );
         uint256 indexTokenPrice = getPrice();
 
@@ -307,10 +307,12 @@ contract PerpEF is ERC20, Ownable {
             revert PerpEF__PositionNotFound();
         }
 
+        // compare collateral with (real-time worth of the position in collateral token + sizeAmountToIncreaseInCollateralToken)
         _checkIfExceedsMaxLevarageAndRevert(
             position.collateral,
-            position.size + sizeAmountToIncreaseInCollateralToken
-        );
+            _convertToCollateralToken(position.sizeInIndexTokens, getPrice()) + sizeAmountToIncreaseInCollateralToken
+        ); 
+        
         uint256 indexTokenPrice = getPrice();
 
         // @follow-up
@@ -337,7 +339,7 @@ contract PerpEF is ERC20, Ownable {
             s_longOpenInterestInTokens += sizeAmountToIncreaseInIndexTokens;
         }
 
-        position.size += sizeAmountToIncreaseInCollateralToken;
+        position.size += sizeAmountToIncreaseInCollateralToken; // Updating the cost of the position
         position.sizeInIndexTokens += sizeAmountToIncreaseInIndexTokens;
 
         emit SizeIncreased(
@@ -366,15 +368,18 @@ contract PerpEF is ERC20, Ownable {
         uint256 positionFee = (sizeAmountToDecreaseInCollateralToken *
             s_positionFee) / FEE_PRECISION;
 
+        // compare collateral with (real-time worth of the position in collateral token - sizeAmountToIncreaseInCollateralToken)
         _checkIfExceedsMaxLevarageAndRevert(
             position.collateral - positionFee,
-            position.size - sizeAmountToDecreaseInCollateralToken
+            _convertToCollateralToken(position.sizeInIndexTokens, getPrice()) - sizeAmountToDecreaseInCollateralToken
         );
 
         uint256 indexTokenPrice = getPrice();
         int256 PnL = _calculatePnL(position, indexTokenPrice);
+
+        // Think the positionSize in the fomula means real-time worth of the position in collateral token
         int256 realizedPnL = PnL *
-            int256(sizeAmountToDecreaseInCollateralToken / position.size);
+            int256(sizeAmountToDecreaseInCollateralToken / _convertToCollateralToken(position.sizeInIndexTokens, getPrice()));
 
         uint256 sizeAmountToDecreaseInIndexTokens = _convertToIndexTokens(
             sizeAmountToDecreaseInCollateralToken,
@@ -382,19 +387,20 @@ contract PerpEF is ERC20, Ownable {
         );
 
         // @follow-up consider fees
+        // Think the positionSize in the fomula means real-time worth of the position in collateral token
         position.borrowingFee +=
-            position.size *
+            _convertToCollateralToken(position.sizeInIndexTokens, getPrice()) *
             (block.timestamp - position.lastUpdateTimestamp) *
             s_borrowingPerSharePerSecond;
         position.lastUpdateTimestamp = block.timestamp;
-        position.size -= sizeAmountToDecreaseInCollateralToken;
+        position.size -= sizeAmountToDecreaseInCollateralToken; // updating the cost of the position
         position.sizeInIndexTokens -= sizeAmountToDecreaseInIndexTokens;
         position.collateral -= positionFee;
 
         if (realizedPnL < 0) {
             _checkIfExceedsMaxLevarageAndRevert(
                 position.collateral - uint256(realizedPnL),
-                position.size
+                _convertToCollateralToken(position.sizeInIndexTokens, getPrice()) // real-time worth of the position in collateral token
             );
             position.collateral -= uint256(realizedPnL);
         } else if (realizedPnL > 0) {
@@ -641,12 +647,12 @@ contract PerpEF is ERC20, Ownable {
     ) internal pure returns (int256 PnL) {
         if (position.positionType == PositionType.LONG) {
             PnL =
-                int256(position.sizeInIndexTokens * indexTokenPrice) -
-                int256(position.size); // @follow-up is this the right way to cast to int256?
+                int256(_convertToCollateralToken(position.sizeInIndexTokens, indexTokenPrice)) -
+                int256(position.size); // @follow-up is this the right way to cast to int256? should be ok
         } else {
             PnL =
                 int256(position.size) -
-                int256(position.sizeInIndexTokens * indexTokenPrice); // @follow-up is this the right way to cast to int256?
+                int256(_convertToCollateralToken(position.sizeInIndexTokens, indexTokenPrice)); // @follow-up is this the right way to cast to int256? shuold be ok 
         }
     }
 
@@ -688,4 +694,19 @@ contract PerpEF is ERC20, Ownable {
             (amountInCollateralToken * tokenPrice) /
             (TOKEN_PRECISION * PRICE_PRECISION);
     }
+
+    /**
+    * @dev Converts given value to collateral token amount.
+    * @param amountInIndexTokens: value to be converted.
+    * @param tokenPrice: price of index token.
+    * @return - uint256 - converted amount of collateral token.
+    */
+    function _convertToCollateralToken(
+        uint256 amountInIndexTokens,
+        uint256 tokenPrice
+    ) internal view returns (uint256) {
+        // @ follow-up: is this correct?
+        return (amountInIndexTokens * TOKEN_PRECISION * PRICE_PRECISION) / tokenPrice;
+    }
+    
 }
