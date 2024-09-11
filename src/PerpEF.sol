@@ -74,7 +74,7 @@ contract PerpEF is ERC20, Ownable {
         uint256 collateral;
         uint256 size;
         uint256 sizeInIndexTokens; // this changes only when the position is realized or closed.
-        uint256 startTimestamp;
+        uint256 lastUpdateTimestamp;
         uint256 borrowingFee; // update every time there is a liquidation check
     }
 
@@ -90,7 +90,7 @@ contract PerpEF is ERC20, Ownable {
     uint256 internal s_longOpenInterestInTokens;
     uint256 internal s_liquidatorFee; // @follow-up decide this
     uint256 internal s_borrowingPerSharePerSecond; // @follow-up decide this
-    uint256 internal s_positionFee; // @follow-up decide this
+    uint256 internal s_positionFee = 10; // over 10_000 (0.1%) // @follow-up decide this
     IERC20 internal immutable i_collateralToken;
     IERC20 internal immutable i_wbtc;
     AggregatorV3Interface internal immutable i_priceOracle;
@@ -99,6 +99,7 @@ contract PerpEF is ERC20, Ownable {
 
     uint256 internal immutable TOKEN_PRECISION;
     uint256 internal immutable PRICE_PRECISION;
+    uint256 internal constant FEE_PRECISION = 10_000;
 
     /// -----------------------------------------------------------------------
     /// Events
@@ -154,6 +155,12 @@ contract PerpEF is ERC20, Ownable {
         uint256 increaseInSizeInIndexToken
     );
 
+    event SizeDecreased(
+        address indexed trader,
+        uint256 sizeDecreasedInCollateralToken,
+        uint256 sizeDecreasedInIndexToken
+    );
+
     /// -----------------------------------------------------------------------
     /// Constructor logic
     /// -----------------------------------------------------------------------
@@ -205,7 +212,7 @@ contract PerpEF is ERC20, Ownable {
         }
 
         // Check if the position (size / collateral) exceeds the max leverage
-        _checkIfExceedsMaxLevarage(collateral, size);
+        _checkIfExceedsMaxLevarageAndRevert(collateral, size);
 
         // liquidity reserves valiation - Traders cannot utilize more than a configured percentage of the deposited liquidity.
         uint256 indexTokenPrice = getPrice();
@@ -227,7 +234,7 @@ contract PerpEF is ERC20, Ownable {
             collateral: collateral,
             size: size,
             sizeInIndexTokens: sizeInIndexTokens,
-            startTimestamp: block.timestamp,
+            lastUpdateTimestamp: block.timestamp,
             borrowingFee: 0
         });
 
@@ -253,7 +260,7 @@ contract PerpEF is ERC20, Ownable {
         if (position.collateral == 0) {
             revert PerpEF__PositionNotFound();
         }
-        _checkIfExceedsMaxLevarage(
+        _checkIfExceedsMaxLevarageAndRevert(
             position.collateral + collateralAmountToIncrease,
             position.size
         );
@@ -300,7 +307,7 @@ contract PerpEF is ERC20, Ownable {
             revert PerpEF__PositionNotFound();
         }
 
-        _checkIfExceedsMaxLevarage(
+        _checkIfExceedsMaxLevarageAndRevert(
             position.collateral,
             position.size + sizeAmountToIncreaseInCollateralToken
         );
@@ -346,7 +353,7 @@ contract PerpEF is ERC20, Ownable {
         // check if there is a opened position
         // check if the new position size exceeds max leverage, if not exceeds, it should not trigg liquidation
         // check if LONG or SHORT position
-        // calculate postion PnL
+        // calculate position PnL
         // calulate realizable amount
         // update storage variables (Position) -> consider positionFee and borrowingFee
         // transfer realizable amount
@@ -356,19 +363,48 @@ contract PerpEF is ERC20, Ownable {
             revert PerpEF__PositionNotFound();
         }
 
-        _checkIfExceedsMaxLevarage(
-            position.collateral,
+        uint256 positionFee = (sizeAmountToDecreaseInCollateralToken *
+            s_positionFee) / FEE_PRECISION;
+
+        _checkIfExceedsMaxLevarageAndRevert(
+            position.collateral - positionFee,
             position.size - sizeAmountToDecreaseInCollateralToken
         );
 
         uint256 indexTokenPrice = getPrice();
+        int256 PnL = _calculatePnL(position, indexTokenPrice);
+        int256 realizedPnL = PnL *
+            int256(sizeAmountToDecreaseInCollateralToken / position.size);
 
-        // @follow-up
-        // think here the sizeInIndexTokens that already in the position should remain unchanged
-        // and we should only calculate the sizeAmountToIncreaseInIndexTokens based on current price
         uint256 sizeAmountToDecreaseInIndexTokens = _convertToIndexTokens(
             sizeAmountToDecreaseInCollateralToken,
             indexTokenPrice
+        );
+
+        // @follow-up consider fees
+        position.borrowingFee +=
+            position.size *
+            (block.timestamp - position.lastUpdateTimestamp) *
+            s_borrowingPerSharePerSecond;
+        position.lastUpdateTimestamp = block.timestamp;
+        position.size -= sizeAmountToDecreaseInCollateralToken;
+        position.sizeInIndexTokens -= sizeAmountToDecreaseInIndexTokens;
+        position.collateral -= positionFee;
+
+        if (realizedPnL < 0) {
+            _checkIfExceedsMaxLevarageAndRevert(
+                position.collateral - uint256(realizedPnL),
+                position.size
+            );
+            position.collateral -= uint256(realizedPnL);
+        } else if (realizedPnL > 0) {
+            i_collateralToken.transfer(msg.sender, uint256(realizedPnL));
+        }
+
+        emit SizeDecreased(
+            msg.sender,
+            sizeAmountToDecreaseInCollateralToken,
+            sizeAmountToDecreaseInIndexTokens
         );
     }
 
@@ -583,12 +619,34 @@ contract PerpEF is ERC20, Ownable {
      * @param collateral: amount of collateral in collateral token.
      * @param size: size value for the position, in collateral token.
      */
-    function _checkIfExceedsMaxLevarage(
+    function _checkIfExceedsMaxLevarageAndRevert(
         uint256 collateral,
         uint256 size
     ) internal view {
-        if (size > collateral * s_maxLeverage) {
+        if (_checkIfExceedsMaxLevarage(collateral, size)) {
             revert PerpEF__ExceedsMaxLeverage();
+        }
+    }
+
+    function _checkIfExceedsMaxLevarage(
+        uint256 collateral,
+        uint256 size
+    ) internal view returns (bool) {
+        return size > collateral * s_maxLeverage;
+    }
+
+    function _calculatePnL(
+        Position memory position,
+        uint256 indexTokenPrice
+    ) internal pure returns (int256 PnL) {
+        if (position.positionType == PositionType.LONG) {
+            PnL =
+                int256(position.sizeInIndexTokens * indexTokenPrice) -
+                int256(position.size); // @follow-up is this the right way to cast to int256?
+        } else {
+            PnL =
+                int256(position.size) -
+                int256(position.sizeInIndexTokens * indexTokenPrice); // @follow-up is this the right way to cast to int256?
         }
     }
 
