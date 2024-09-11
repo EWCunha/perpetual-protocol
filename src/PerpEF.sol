@@ -143,6 +143,11 @@ contract PerpEF is ERC20, Ownable {
         uint256 increaseInCollateral
     );
 
+    event CollateralDecreased(
+        address indexed trader,
+        uint256 decreaseInCollateral
+    );
+
     /**
      * @dev event for when size is increased.
      * @param trader: address of the trader.
@@ -290,9 +295,30 @@ contract PerpEF is ERC20, Ownable {
 
     function decreaseCollateral(uint256 collateralAmountToDecrease) external {
         // check if there is a opened position
+        Position storage position = s_positions[msg.sender];
+        if (position.collateral == 0) {
+            revert PerpEF__PositionNotFound();
+        }
+
         // check if the new position collateral exceeds max leverage, if exceeds, revert
+        uint256 price = getPrice();
+        _checkIfExceedsMaxLevarageAndRevert(
+            position.collateral - collateralAmountToDecrease,
+            _convertToCollateralToken(position.sizeInIndexTokens, price)
+        );
+
         // update storage (Position)
+        position.lastUpdateTimestamp = block.timestamp;
+        position.size = _convertToCollateralToken(
+            position.sizeInIndexTokens,
+            price
+        ); // updating the cost of the position
+        position.collateral -= collateralAmountToDecrease;
+
         // transfer collateral to trader
+        i_collateralToken.transfer(msg.sender, collateralAmountToDecrease);
+
+        emit CollateralDecreased(msg.sender, collateralAmountToDecrease);
     }
 
     /**
@@ -310,9 +336,10 @@ contract PerpEF is ERC20, Ownable {
         // compare collateral with (real-time worth of the position in collateral token + sizeAmountToIncreaseInCollateralToken)
         _checkIfExceedsMaxLevarageAndRevert(
             position.collateral,
-            _convertToCollateralToken(position.sizeInIndexTokens, getPrice()) + sizeAmountToIncreaseInCollateralToken
-        ); 
-        
+            _convertToCollateralToken(position.sizeInIndexTokens, getPrice()) +
+                sizeAmountToIncreaseInCollateralToken
+        );
+
         uint256 indexTokenPrice = getPrice();
 
         // @follow-up
@@ -371,7 +398,8 @@ contract PerpEF is ERC20, Ownable {
         // compare collateral with (real-time worth of the position in collateral token - sizeAmountToIncreaseInCollateralToken)
         _checkIfExceedsMaxLevarageAndRevert(
             position.collateral - positionFee,
-            _convertToCollateralToken(position.sizeInIndexTokens, getPrice()) - sizeAmountToDecreaseInCollateralToken
+            _convertToCollateralToken(position.sizeInIndexTokens, getPrice()) -
+                sizeAmountToDecreaseInCollateralToken
         );
 
         uint256 indexTokenPrice = getPrice();
@@ -379,7 +407,13 @@ contract PerpEF is ERC20, Ownable {
 
         // Think the positionSize in the fomula means real-time worth of the position in collateral token
         int256 realizedPnL = PnL *
-            int256(sizeAmountToDecreaseInCollateralToken / _convertToCollateralToken(position.sizeInIndexTokens, getPrice()));
+            int256(
+                sizeAmountToDecreaseInCollateralToken /
+                    _convertToCollateralToken(
+                        position.sizeInIndexTokens,
+                        getPrice()
+                    )
+            );
 
         uint256 sizeAmountToDecreaseInIndexTokens = _convertToIndexTokens(
             sizeAmountToDecreaseInCollateralToken,
@@ -400,7 +434,10 @@ contract PerpEF is ERC20, Ownable {
         if (realizedPnL < 0) {
             _checkIfExceedsMaxLevarageAndRevert(
                 position.collateral - uint256(realizedPnL),
-                _convertToCollateralToken(position.sizeInIndexTokens, getPrice()) // real-time worth of the position in collateral token
+                _convertToCollateralToken(
+                    position.sizeInIndexTokens,
+                    getPrice()
+                ) // real-time worth of the position in collateral token
             );
             position.collateral -= uint256(realizedPnL);
         } else if (realizedPnL > 0) {
@@ -644,15 +681,25 @@ contract PerpEF is ERC20, Ownable {
     function _calculatePnL(
         Position memory position,
         uint256 indexTokenPrice
-    ) internal pure returns (int256 PnL) {
+    ) internal view returns (int256 PnL) {
         if (position.positionType == PositionType.LONG) {
             PnL =
-                int256(_convertToCollateralToken(position.sizeInIndexTokens, indexTokenPrice)) -
+                int256(
+                    _convertToCollateralToken(
+                        position.sizeInIndexTokens,
+                        indexTokenPrice
+                    )
+                ) -
                 int256(position.size); // @follow-up is this the right way to cast to int256? should be ok
         } else {
             PnL =
                 int256(position.size) -
-                int256(_convertToCollateralToken(position.sizeInIndexTokens, indexTokenPrice)); // @follow-up is this the right way to cast to int256? shuold be ok 
+                int256(
+                    _convertToCollateralToken(
+                        position.sizeInIndexTokens,
+                        indexTokenPrice
+                    )
+                ); // @follow-up is this the right way to cast to int256? shuold be ok
         }
     }
 
@@ -696,17 +743,18 @@ contract PerpEF is ERC20, Ownable {
     }
 
     /**
-    * @dev Converts given value to collateral token amount.
-    * @param amountInIndexTokens: value to be converted.
-    * @param tokenPrice: price of index token.
-    * @return - uint256 - converted amount of collateral token.
-    */
+     * @dev Converts given value to collateral token amount.
+     * @param amountInIndexTokens: value to be converted.
+     * @param tokenPrice: price of index token.
+     * @return - uint256 - converted amount of collateral token.
+     */
     function _convertToCollateralToken(
         uint256 amountInIndexTokens,
         uint256 tokenPrice
     ) internal view returns (uint256) {
         // @ follow-up: is this correct?
-        return (amountInIndexTokens * TOKEN_PRECISION * PRICE_PRECISION) / tokenPrice;
+        return
+            (amountInIndexTokens * TOKEN_PRECISION * PRICE_PRECISION) /
+            tokenPrice;
     }
-    
 }
