@@ -301,18 +301,13 @@ contract PerpEF is ERC20, Ownable {
         }
 
         // check if the new position collateral exceeds max leverage, if exceeds, revert
-        uint256 price = getPrice();
         _checkIfExceedsMaxLevarageAndRevert(
             position.collateral - collateralAmountToDecrease,
-            _convertToCollateralToken(position.sizeInIndexTokens, price)
+            _convertToCollateralToken(position.sizeInIndexTokens, getPrice())
         );
 
         // update storage (Position)
         position.lastUpdateTimestamp = block.timestamp;
-        position.size = _convertToCollateralToken(
-            position.sizeInIndexTokens,
-            price
-        ); // updating the cost of the position
         position.collateral -= collateralAmountToDecrease;
 
         // transfer collateral to trader
