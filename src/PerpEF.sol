@@ -53,6 +53,9 @@ contract PerpEF is ERC20, Ownable {
     /// @dev error for when a position could not be found for calling trader.
     error PerpEF__PositionNotFound();
 
+    /// @dev error for when a position could not be liquidated.
+    error PerpEF__PositionNotLiquidatable();
+
     /// -----------------------------------------------------------------------
     /// Custom types
     /// -----------------------------------------------------------------------
@@ -88,7 +91,7 @@ contract PerpEF is ERC20, Ownable {
     uint256 internal s_depositedLiquidity;
     uint256 internal s_shortOpenInterest;
     uint256 internal s_longOpenInterestInTokens;
-    uint256 internal s_liquidatorFee; // @follow-up decide this
+    uint256 internal s_liquidatorFee = 500; // over 10_000 (5%) @follow-up decide this
     uint256 internal s_borrowingPerSharePerSecond; // @follow-up decide this
     uint256 internal s_positionFee = 10; // over 10_000 (0.1%) // @follow-up decide this
     IERC20 internal immutable i_collateralToken;
@@ -165,6 +168,17 @@ contract PerpEF is ERC20, Ownable {
         uint256 sizeDecreasedInCollateralToken,
         uint256 sizeDecreasedInIndexToken
     );
+
+    /**
+     * @dev event for when a position is liquidated.
+     * @param liquidator: address of the liquidator.
+     * @param trader: address of the trader.
+     */
+    event PositionLiquidated(
+        address indexed liquidator;
+        address indexed trader,
+    );
+
 
     /// -----------------------------------------------------------------------
     /// Constructor logic
@@ -448,10 +462,69 @@ contract PerpEF is ERC20, Ownable {
 
     function liquidate(address trader) external {
         // check if there is a opened position
+        Position storage position = s_positions[trader];
+        if (position.collateral == 0) {
+            revert PerpEF__PositionNotFound();
+        }
+
         // check if position is liquidatable
+        if (!_checkIfExceedsMaxLevarage(
+            position.collateral,
+            _convertToCollateralToken(position.sizeInIndexTokens, getPrice())
+            )) {
+            revert PerpEF__PositionNotLiquidatable();
+        }
+
+        // liquidate position - size decreased by 100%
+        uint256 sizeAmountToDecreaseInCollateralToken = _convertToCollateralToken(position.sizeInIndexTokens, getPrice());
+
+        uint256 positionFee = (sizeAmountToDecreaseInCollateralToken *
+            s_positionFee) / FEE_PRECISION;
+
+        uint256 indexTokenPrice = getPrice();
+        int256 PnL = _calculatePnL(position, indexTokenPrice);
+
+        int256 realizedPnL = PnL;
+
+        /*
+        uint256 sizeAmountToDecreaseInIndexTokens = _convertToIndexTokens(
+            sizeAmountToDecreaseInCollateralToken,
+            indexTokenPrice
+        );
+        */
+
+        position.borrowingFee +=
+            _convertToCollateralToken(position.sizeInIndexTokens, getPrice()) *
+            (block.timestamp - position.lastUpdateTimestamp) *
+            s_borrowingPerSharePerSecond;
+        position.lastUpdateTimestamp = block.timestamp;
+        position.size -= sizeAmountToDecreaseInCollateralToken; // updating the cost of the position
+        position.sizeInIndexTokens = 0;
+
+        position.collateral -= positionFee;
+        position.collateral -= borrowingFee; // Borrowing fee is deducted from the collateral since the position is being closed
+
+        if (realizedPnL < 0) {
+            position.collateral -= uint256(realizedPnL);
+        } else if (realizedPnL > 0) {
+            i_collateralToken.transfer(trader, uint256(realizedPnL));
+        }
+
         // calculate liquidator fee -> deduce from the collateral
-        // liquidate position
-        // transfer liquidator fee
+        uint256 liquidatorFee = (position.collateral *
+            s_liquidatorFee) / FEE_PRECISION;
+
+        // transfer liquidator fee to liquidator
+        position.collateral -= liquidatorFee;
+        i_collateralToken.transfer(msg.sender, liquidatorFee);
+
+        // transfer remaining collateral to trader
+        i_collateralToken.transfer(trader, position.collateral);
+
+        // close the position
+        delete s_positions[trader];
+
+        emit PositionLiquidated(msg.sender, trader);
     }
 
     /**
